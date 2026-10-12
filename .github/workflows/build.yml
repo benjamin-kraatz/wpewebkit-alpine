@@ -1,0 +1,90 @@
+name: Build
+
+# Runs only on our own pushes and manual starts, never on pull requests,
+# so the signing key never reaches code from a fork.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - APKBUILD
+      - build.sh
+      - keys/**
+      - .github/workflows/build.yml
+
+concurrency:
+  group: build
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+          - arch: x86_64
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+
+      # The build tree takes about 6 GB.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache /usr/local/share/boost
+          df -h /
+
+      - name: Build
+        env:
+          ABUILD_PRIVKEY: ${{ secrets.ABUILD_PRIVKEY }}
+        run: |
+          mkdir out
+          docker run --rm -e ABUILD_PRIVKEY -v "$PWD:/src:ro" -v "$PWD/out:/out" alpine:3.24 /src/build.sh
+
+      # Both architectures' files land in one release, so their names need the arch.
+      - name: Name packages by architecture
+        working-directory: out
+        run: for f in *.apk; do mv "$f" "${f%.apk}.${{ matrix.arch }}.apk"; done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packages-${{ matrix.arch }}
+          path: out/*.apk
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: packages-*
+          path: out
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pkgver=$(sed -n 's/^pkgver=//p' APKBUILD)
+          pkgrel=$(sed -n 's/^pkgrel=//p' APKBUILD)
+          tag="$pkgver-r$pkgrel"
+          cp keys/wpewebkit-alpine.rsa.pub out/
+          (cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" out/* --clobber
+          else
+            gh release create "$tag" out/* --title "WPE WebKit $tag" \
+              --notes "WPE WebKit $pkgver for Alpine 3.24, aarch64 and x86_64. See the README for how to install it and which features are on. Built by run ${{ github.run_id }} from ${{ github.sha }}."
+          fi
