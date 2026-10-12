@@ -14,7 +14,9 @@ out=${OUT:-/out}
 keyname=wpewebkit-alpine.rsa
 home=/home/builder
 
-apk add --no-cache alpine-sdk
+# Keeps the package index, which abuild needs to install the build dependencies.
+apk update
+apk add alpine-sdk
 adduser -D -G abuild builder
 mkdir -p "$home/.abuild" "$home/wpewebkit" "$home/packages"
 cp "$src/APKBUILD" "$home/wpewebkit/"
